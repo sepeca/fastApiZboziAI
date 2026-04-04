@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Text, Numeric, ForeignKey, DateTime, Computed, Index
+from sqlalchemy import Column, Integer, String, Text, Numeric, ForeignKey, DateTime, Computed, Index, Boolean, Float, Uuid
+import uuid
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import TSVECTOR
@@ -37,11 +38,43 @@ class Product(Base):
     )
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
     category = relationship("Category", back_populates="products")
 
+    categorization_logs = relationship("CategorizationLog", back_populates="product", cascade="all, delete-orphan")
+    interactions = relationship("UserInteraction", back_populates="product", cascade="all, delete-orphan")
     __table_args__ = (
         Index('product_hnsw_idx', 'embedding', postgresql_using='hnsw',
               postgresql_with={'m': 16, 'ef_construction': 64}, postgresql_ops={'embedding': 'vector_cosine_ops'}),
         Index('product_fts_idx', 'fts_vector', postgresql_using='gin'),
     )
+
+
+class CategorizationLog(Base):
+    __tablename__ = "categorization_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+    predicted_category_id = Column(Integer, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True)
+
+    confidence_score = Column(Float, nullable=False)
+    is_reviewed = Column(Boolean, default=False)
+
+    final_category_id = Column(Integer, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    product = relationship("Product", back_populates="categorization_logs")
+    predicted_category = relationship("Category", foreign_keys=[predicted_category_id])
+    final_category = relationship("Category", foreign_keys=[final_category_id])
+
+
+class UserInteraction(Base):
+    __tablename__ = "user_interactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Uuid(as_uuid=True), default=uuid.uuid4, nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+
+    interaction_type = Column(String(50), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    product = relationship("Product", back_populates="interactions")
