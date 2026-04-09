@@ -69,10 +69,59 @@ def create_product(product: schemas.ProductBase, db: Session = Depends(get_db)):
 
     vector_list = final_emb.tolist()
 
+    predicted_cat_id = None
+    confidence_score = 0.0
+    needs_review = False
+
+    if product.category_id is None:
+        known_products = db.query(models.Product).filter(models.Product.category_id.isnot(None)).all()
+
+        if known_products:
+            category_vectors = {}
+            for kp in known_products:
+                if kp.category_id not in category_vectors:
+                    category_vectors[kp.category_id] = []
+                category_vectors[kp.category_id].append(np.array(kp.embedding))
+
+            best_cat_id = None
+            min_distance = 2.0
+
+            for cat_id, vecs in category_vectors.items():
+                centroid = np.mean(vecs, axis=0)
+
+                dot_product = np.dot(final_emb, centroid)
+                norm_a = np.linalg.norm(final_emb)
+                norm_b = np.linalg.norm(centroid)
+                dist = 1.0 - (dot_product / (norm_a * norm_b))
+
+                if dist < min_distance:
+                    min_distance = dist
+                    best_cat_id = cat_id
+
+            predicted_cat_id = best_cat_id
+
+            confidence_score = max(0.0, (1.0 - (min_distance / 0.45))) * 100.0
+
+            if confidence_score >= 60.0:
+                product.category_id = predicted_cat_id
+            else:
+                needs_review = True
+
     db_product = models.Product(**product.model_dump(), embedding=vector_list)
     db.add(db_product)
     db.commit()
     db.refresh(db_product)
+
+    if needs_review and predicted_cat_id is not None:
+        log_entry = models.CategorizationLog(
+            product_id=db_product.id,
+            predicted_category_id=predicted_cat_id,
+            confidence_score=confidence_score,
+            is_reviewed=False
+        )
+        db.add(log_entry)
+        db.commit()
+
     return db_product
 
 @app.get("/search/", response_model=List[schemas.ProductResponse], tags=["Search"])
