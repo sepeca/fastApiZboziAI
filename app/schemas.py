@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
 from uuid import UUID
@@ -6,7 +6,12 @@ from uuid import UUID
 
 class CategoryBase(BaseModel):
     name: str
-    parent_id: Optional[int] = None
+    path: str
+
+    @field_validator('path', mode='before')
+    @classmethod
+    def convert_ltree_to_str(cls, v):
+        return str(v)
 
 
 class CategoryResponse(CategoryBase):

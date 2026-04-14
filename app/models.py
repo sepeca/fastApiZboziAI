@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, Numeric, ForeignKey, DateTime, Computed, Index, Boolean, Float, Uuid
 import uuid
+from sqlalchemy_utils import LtreeType
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import TSVECTOR
@@ -12,12 +13,14 @@ class Category(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
-    parent_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
+    path = Column(LtreeType, nullable=False, unique=True)
 
     category_embedding = Column(Vector(512), nullable=True)
 
     products = relationship("Product", back_populates="category")
-
+    __table_args__ = (
+        Index('ix_category_path_gist', 'path', postgresql_using='gist'),
+    )
 
 class Product(Base):
     __tablename__ = "products"
