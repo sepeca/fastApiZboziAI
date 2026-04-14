@@ -65,7 +65,8 @@ def create_product(product: schemas.ProductBase, db: Session = Depends(get_db)):
         img = load_image_from_url(product.image_url)
         if img:
             img_emb = img_model.encode(img)
-            final_emb = (text_emb + img_emb) / 2.0
+            mixed_emb = (text_emb + img_emb) / 2.0
+            final_emb = mixed_emb / np.linalg.norm(mixed_emb)
 
     vector_list = final_emb.tolist()
 
