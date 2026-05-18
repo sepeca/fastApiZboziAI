@@ -1,6 +1,7 @@
+import unicodedata
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
 from sqlalchemy.orm import Session
-from sqlalchemy import text, or_,func,cast, Text
+from sqlalchemy import text, or_, func, cast, Text
 from typing import List, Optional
 from sentence_transformers import SentenceTransformer
 from PIL import Image
@@ -35,6 +36,7 @@ def on_startup():
 @app.get("/")
 def read_root():
     return {"message": "Welcome to ZboziAI Hybrid Search API"}
+
 
 def load_image_from_url(url: str):
     try:
@@ -236,7 +238,8 @@ def search_products(query: str,
                     user_id: Optional[UUID] = None,
                     category_id: Optional[int] = None,
                     db: Session = Depends(get_db)):
-    query_vector = text_model.encode(query)
+    query_clean = ''.join(c for c in unicodedata.normalize('NFKD', query.lower()) if unicodedata.category(c) != 'Mn')
+    query_vector = text_model.encode(query_clean)
     query_vector = query_vector / np.linalg.norm(query_vector)
 
     if user_id:
@@ -252,20 +255,28 @@ def search_products(query: str,
             user_pref_vector = np.mean(user_vectors, axis=0)
             user_pref_vector = user_pref_vector / np.linalg.norm(user_pref_vector)
 
-            query_vector = (query_vector * 0.7) + (user_pref_vector * 0.3)
+            query_vector = (query_vector * 0.9) + (user_pref_vector * 0.1)
             query_vector = query_vector / np.linalg.norm(query_vector)
 
     final_query_list = query_vector.tolist()
 
+    search_text = models.Product.title + ' ' + func.coalesce(models.Product.description, '')
+
+    fts_query = func.plainto_tsquery('simple', query)
+
     distance_metric = models.Product.embedding.cosine_distance(final_query_list).label("distance")
-    query_obj = db.query(models.Product, distance_metric)
+
+    text_similarity_metric = func.similarity(func.unaccent(models.Product.title), func.unaccent(query_clean)).label(
+        "text_similarity")
+    fts_rank_metric = func.ts_rank(models.Product.fts_vector, fts_query).label("fts_rank")
+
+    query_obj = db.query(models.Product, distance_metric, text_similarity_metric, fts_rank_metric)
 
     if category_id:
         target_category = db.query(models.Category).filter(models.Category.id == category_id).first()
 
         if target_category:
             path_str = str(target_category.path)
-
             query_obj = query_obj.join(models.Category).filter(
                 cast(models.Category.path, Text).startswith(path_str)
             )
@@ -273,21 +284,64 @@ def search_products(query: str,
             raise HTTPException(status_code=404, detail="Category not found")
 
     vector_condition = models.Product.embedding.cosine_distance(final_query_list) < threshold
-    text_condition = func.unaccent(models.Product.title).ilike(func.unaccent(f"%{query}%"))
+
+    text_condition_title = func.similarity(func.unaccent(models.Product.title), func.unaccent(query_clean)) > 0.3
+    text_condition_desc = func.unaccent(search_text).ilike(f"%{query_clean}%")
+    fts_condition = models.Product.fts_vector.op('@@')(fts_query)
 
     results = query_obj.filter(
-        or_(vector_condition, text_condition)
+        or_(vector_condition, text_condition_title, text_condition_desc, fts_condition)
     ).all()
 
+    parsed_results = []
+
+    for product, vec_dist, text_sim, fts_rank in results:
+        title_clean = ''.join(
+            c for c in unicodedata.normalize('NFKD', product.title.lower()) if unicodedata.category(c) != 'Mn')
+        desc_clean = ''.join(
+            c for c in unicodedata.normalize('NFKD', (product.description or '').lower()) if
+            unicodedata.category(c) != 'Mn')
+
+        exact_match_title = query_clean in title_clean
+        exact_match_desc = query_clean in desc_clean
+
+        if exact_match_desc and text_sim is not None and text_sim < 0.3:
+            text_sim = 0.5
+
+        parsed_results.append({
+            "product": product,
+            "vec_dist": vec_dist if vec_dist is not None else 2.0,
+            "text_sim": text_sim if text_sim is not None else 0.0,
+            "fts_rank": fts_rank if fts_rank is not None else 0.0,
+            "exact_match": exact_match_title
+        })
+
+    parsed_results.sort(key=lambda x: x["vec_dist"])
+    for i, res in enumerate(parsed_results):
+        res["vec_rank"] = i + 1
+
+    parsed_results.sort(key=lambda x: x["text_sim"], reverse=True)
+    for i, res in enumerate(parsed_results):
+        res["text_sim_rank"] = i + 1
+
+    parsed_results.sort(key=lambda x: x["fts_rank"], reverse=True)
+    for i, res in enumerate(parsed_results):
+        res["fts_rank_rank"] = i + 1
+
     final_response = []
-    for product, dist in results:
-        prod_data = schemas.ProductResponse.model_validate(product).model_dump()
-        final_distance = dist
+    k = 60
 
-        if query.lower() in product.title.lower():
-            final_distance -= 0.20
+    for res in parsed_results:
+        rrf_score = (1.0 / (k + res["vec_rank"])) + \
+                    (1.0 / (k + res["text_sim_rank"])) + \
+                    (1.0 / (k + res["fts_rank_rank"]))
 
-        prod_data["search_distance"] = round(final_distance, 3)
+        if res["exact_match"]:
+            rrf_score += 100.0
+
+        prod_data = schemas.ProductResponse.model_validate(res["product"]).model_dump()
+
+        prod_data["search_distance"] = round(1.0 / rrf_score, 4)
         final_response.append(prod_data)
 
     final_response = sorted(final_response, key=lambda x: x["search_distance"])
